@@ -78,23 +78,6 @@ function mulberry32(seed: number): () => number {
   }
 }
 
-const REGION_WEIGHTS: Record<Region, number> = {
-  Northeast: 0.24,
-  Southeast: 0.22,
-  Midwest: 0.2,
-  West: 0.2,
-  Southwest: 0.14,
-}
-
-// Baseline on-time reliability per region (some lanes run tighter than others).
-const REGION_RELIABILITY: Record<Region, number> = {
-  Northeast: 0.93,
-  Southeast: 0.945,
-  Midwest: 0.955,
-  West: 0.935,
-  Southwest: 0.925,
-}
-
 const EXCEPTION_WEIGHTS: Record<ExceptionType, number> = {
   Delayed: 0.5,
   'Address Issue': 0.18,
@@ -103,48 +86,126 @@ const EXCEPTION_WEIGHTS: Record<ExceptionType, number> = {
   'Lost in Transit': 0.06,
 }
 
-function generateDay(index: number, date: Date): DayRecord {
-  const rand = mulberry32(0x9e3779b9 ^ (index * 2654435761))
+/**
+ * Each region has its own trajectory so filtering tells a distinct story:
+ *  - baseVolume       avg daily shipments at the start of the window
+ *  - growth           multiplicative change across the full window
+ *                     (>1 expanding, <1 contracting)
+ *  - seasonalAmp      sensitivity to the Nov/Dec holiday peak
+ *  - volatility       day-to-day noise amplitude
+ *  - reliabilityStart / reliabilityEnd  on-time rate drifts over time
+ */
+interface RegionProfile {
+  baseVolume: number
+  growth: number
+  seasonalAmp: number
+  volatility: number
+  reliabilityStart: number
+  reliabilityEnd: number
+}
+
+const REGION_PROFILES: Record<Region, RegionProfile> = {
+  // Mature flagship market: large, steady, dependable — the backbone.
+  Northeast: {
+    baseVolume: 520,
+    growth: 1.05,
+    seasonalAmp: 1,
+    volatility: 0.12,
+    reliabilityStart: 0.93,
+    reliabilityEnd: 0.935,
+  },
+  // Growth story: started small, expanding fast as the network invests and
+  // operations mature — volume more than doubles and reliability climbs.
+  Southeast: {
+    baseVolume: 240,
+    growth: 2.3,
+    seasonalAmp: 1.1,
+    volatility: 0.18,
+    reliabilityStart: 0.9,
+    reliabilityEnd: 0.95,
+  },
+  // Operational gold standard: steady moderate growth, best-in-class on-time.
+  Midwest: {
+    baseVolume: 430,
+    growth: 1.15,
+    seasonalAmp: 0.9,
+    volatility: 0.1,
+    reliabilityStart: 0.955,
+    reliabilityEnd: 0.96,
+  },
+  // Decline story: losing business and slipping operationally — volume nearly
+  // halves while on-time rate erodes, prompting the "why?" conversation.
+  Southwest: {
+    baseVolume: 460,
+    growth: 0.5,
+    seasonalAmp: 1,
+    volatility: 0.16,
+    reliabilityStart: 0.94,
+    reliabilityEnd: 0.88,
+  },
+  // Volatile, highly seasonal market: bumpy week to week with strong holiday
+  // peaks, growing overall but unpredictable.
+  West: {
+    baseVolume: 360,
+    growth: 1.35,
+    seasonalAmp: 1.4,
+    volatility: 0.26,
+    reliabilityStart: 0.925,
+    reliabilityEnd: 0.93,
+  },
+}
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t
+}
+
+function generateDay(index: number, date: Date, total: number): DayRecord {
   const dow = date.getDay() // 0 = Sun
+  const month = date.getMonth()
+  // Progress through the window, 0 at the start and 1 at "today".
+  const progress = total > 0 ? index / total : 0
 
   // Weekly seasonality: weekends are much lighter for freight ops.
   const weekendFactor = dow === 0 ? 0.45 : dow === 6 ? 0.6 : 1
-  // Gentle long-term growth over the window.
-  const trend = 1 + index * 0.00035
-  // Holiday peak around Nov/Dec.
-  const month = date.getMonth()
-  const seasonal = month === 10 ? 1.18 : month === 11 ? 1.28 : month <= 1 ? 0.95 : 1
-  const noise = 0.85 + rand() * 0.3
+  // Holiday peak around Nov/Dec, soft dip in Jan/Feb. Scaled per region.
+  const seasonalPeak = month === 10 ? 0.18 : month === 11 ? 0.28 : month <= 1 ? -0.05 : 0
 
-  const shipments = Math.round(2100 * weekendFactor * trend * seasonal * noise)
-
-  // On-time rate dips slightly when volume surges.
-  const surgePenalty = (seasonal - 1) * 0.06
-  const onTimeRate = clamp(0.955 - surgePenalty + (rand() - 0.5) * 0.04, 0.86, 0.99)
-  const onTime = Math.round(shipments * onTimeRate)
-
-  // Regional split.
   const regions = {} as DayRecord['regions']
-  let allocated = 0
+  let totalShipments = 0
+  let totalOnTime = 0
+
   REGIONS.forEach((region, i) => {
-    const isLast = i === REGIONS.length - 1
-    const wobble = 0.92 + rand() * 0.16
-    const rShip = isLast
-      ? shipments - allocated
-      : Math.round(shipments * REGION_WEIGHTS[region] * wobble)
-    allocated += rShip
-    const rRate = clamp(REGION_RELIABILITY[region] + (rand() - 0.5) * 0.05, 0.84, 0.99)
-    regions[region] = { shipments: Math.max(0, rShip), onTime: Math.round(Math.max(0, rShip) * rRate) }
+    const p = REGION_PROFILES[region]
+    // Independent deterministic stream per region per day.
+    const rand = mulberry32(0x9e3779b9 ^ (index * 2654435761) ^ ((i + 1) * 0x85ebca6b))
+
+    // Compound the region's own growth/decline across the window.
+    const trend = Math.pow(p.growth, progress)
+    const seasonal = 1 + seasonalPeak * p.seasonalAmp
+    const noise = 1 - p.volatility / 2 + rand() * p.volatility
+
+    const shipments = Math.max(0, Math.round(p.baseVolume * trend * seasonal * weekendFactor * noise))
+
+    // Reliability drifts from start to end, dips a little during volume surges.
+    const baseReliability = lerp(p.reliabilityStart, p.reliabilityEnd, progress)
+    const surgePenalty = Math.max(0, seasonalPeak) * p.seasonalAmp * 0.15
+    const onTimeRate = clamp(baseReliability - surgePenalty + (rand() - 0.5) * 0.03, 0.8, 0.99)
+    const onTime = Math.round(shipments * onTimeRate)
+
+    regions[region] = { shipments, onTime }
+    totalShipments += shipments
+    totalOnTime += onTime
   })
 
-  // Open exceptions are correlated with late shipments plus a small baseline.
-  const late = shipments - onTime
-  const exceptionTotal = Math.round(late * 0.55 + 8 + rand() * 30)
+  // Open exceptions are correlated with network-wide late shipments.
+  const exRand = mulberry32(0x27d4eb2f ^ (index * 2246822519))
+  const late = totalShipments - totalOnTime
+  const exceptionTotal = Math.round(late * 0.55 + 8 + exRand() * 30)
   const exceptions = {} as DayRecord['exceptions']
   let exAllocated = 0
   EXCEPTION_TYPES.forEach((type, i) => {
     const isLast = i === EXCEPTION_TYPES.length - 1
-    const wobble = 0.85 + rand() * 0.3
+    const wobble = 0.85 + exRand() * 0.3
     const count = isLast
       ? exceptionTotal - exAllocated
       : Math.round(exceptionTotal * EXCEPTION_WEIGHTS[type] * wobble)
@@ -152,7 +213,7 @@ function generateDay(index: number, date: Date): DayRecord {
     exceptions[type] = Math.max(0, count)
   })
 
-  return { date: toISODate(date), shipments, onTime, regions, exceptions }
+  return { date: toISODate(date), shipments: totalShipments, onTime: totalOnTime, regions, exceptions }
 }
 
 function clamp(v: number, min: number, max: number): number {
@@ -167,7 +228,7 @@ export function getDailyData(): DayRecord[] {
   const total = daysBetween(MIN_DATE, MAX_DATE)
   const out: DayRecord[] = []
   for (let i = 0; i <= total; i++) {
-    out.push(generateDay(i, addDays(MIN_DATE, i)))
+    out.push(generateDay(i, addDays(MIN_DATE, i), total))
   }
   cache = out
   return out
@@ -292,7 +353,7 @@ export function buildTrend(records: DayRecord[], regions: Region[] = [...REGIONS
   const granularity: TrendSeries['granularity'] =
     span <= 45 ? 'day' : span <= 270 ? 'week' : 'month'
 
-  const buckets = new Map<string, { label: string; sort: string; shipments: number; onTime: number }>()
+  const buckets = new Map<string, { label: string; sort: string; shipments: number; onTime: number; days: number }>()
 
   for (const r of records) {
     const d = parseISODate(r.date)!
@@ -321,13 +382,26 @@ export function buildTrend(records: DayRecord[], regions: Region[] = [...REGIONS
       onTime += r.regions[region].onTime
     }
 
-    const b = buckets.get(key) ?? { label, sort, shipments: 0, onTime: 0 }
+    const b = buckets.get(key) ?? { label, sort, shipments: 0, onTime: 0, days: 0 }
     b.shipments += shipments
     b.onTime += onTime
+    b.days += 1
     buckets.set(key, b)
   }
 
   const ordered = [...buckets.values()].sort((a, b) => a.sort.localeCompare(b.sort))
+
+  // Drop an incomplete trailing bucket so a partial current week/month doesn't
+  // read as a false "cliff" at the end of the trend.
+  if (granularity !== 'day' && ordered.length > 1) {
+    const last = ordered[ordered.length - 1]!
+    const expected =
+      granularity === 'week'
+        ? 7
+        : new Date(Number(last.sort.slice(0, 4)), Number(last.sort.slice(5, 7)), 0).getDate()
+    if (last.days < expected) ordered.pop()
+  }
+
   return {
     labels: ordered.map((b) => b.label),
     shipments: ordered.map((b) => b.shipments),
