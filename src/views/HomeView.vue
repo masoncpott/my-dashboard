@@ -13,6 +13,8 @@ import {
   getRange,
   summarize,
   buildTrend,
+  REGIONS,
+  type Region,
 } from '../data/logistics'
 
 const theme = useTheme()
@@ -20,6 +22,21 @@ const palette = computed(() => theme.current.value.colors as Record<string, stri
 
 const minISO = toISODate(MIN_DATE)
 const maxISO = toISODate(MAX_DATE)
+
+// --- Region filter ---------------------------------------------------------
+
+const ALL = 'all' as const
+// Selected region, or 'all' for the whole network (default).
+const selectedRegion = ref<Region | typeof ALL>(ALL)
+
+const regionOptions = [
+  { title: 'All Regions', value: ALL },
+  ...REGIONS.map((r) => ({ title: r, value: r })),
+]
+
+const activeRegions = computed<Region[]>(() =>
+  selectedRegion.value === ALL ? [...REGIONS] : [selectedRegion.value],
+)
 
 // --- Date range state ------------------------------------------------------
 
@@ -130,13 +147,17 @@ const activePreset = computed<PresetKey | null>(() => {
 // --- Derived data ----------------------------------------------------------
 
 const records = computed(() => getRange(applied.value.start, applied.value.end))
-const summary = computed(() => summarize(records.value))
-const trend = computed(() => buildTrend(records.value))
+const summary = computed(() => summarize(records.value, activeRegions.value))
+const trend = computed(() => buildTrend(records.value, activeRegions.value))
 
 const rangeLabel = computed(() => {
   const fmt = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
   return `${fmt(applied.value.start)} – ${fmt(applied.value.end)}`
 })
+
+const scopeLabel = computed(() =>
+  selectedRegion.value === ALL ? 'All regions' : `${selectedRegion.value} region`,
+)
 
 const nf = new Intl.NumberFormat('en-US')
 
@@ -159,13 +180,21 @@ const kpis = computed(() => [
     icon: 'mdi-alert-circle-outline',
     color: 'warning',
   },
-  {
-    title: 'Top Region',
-    value: summary.value.bestRegion.name,
-    sub: `${(summary.value.bestRegion.rate * 100).toFixed(1)}% on-time`,
-    icon: 'mdi-map-marker-radius-outline',
-    color: 'info',
-  },
+  selectedRegion.value === ALL
+    ? {
+        title: 'Top Region',
+        value: summary.value.bestRegion.name,
+        sub: `${(summary.value.bestRegion.rate * 100).toFixed(1)}% on-time`,
+        icon: 'mdi-map-marker-radius-outline',
+        color: 'info',
+      }
+    : {
+        title: 'Region',
+        value: selectedRegion.value,
+        sub: `${(summary.value.onTimeRate * 100).toFixed(1)}% on-time`,
+        icon: 'mdi-map-marker-radius-outline',
+        color: 'info',
+      },
 ])
 
 // --- Chart datasets (theme-aware) -----------------------------------------
@@ -252,7 +281,9 @@ const granularityNote = computed(() => {
     <div class="d-flex flex-wrap align-center justify-space-between mb-1 ga-2">
       <div>
         <h1 class="text-h5 font-weight-bold">Operations Overview</h1>
-        <div class="text-body-2 text-medium-emphasis">{{ rangeLabel }} · {{ granularityNote }} view</div>
+        <div class="text-body-2 text-medium-emphasis">
+          {{ rangeLabel }} · {{ granularityNote }} view · {{ scopeLabel }}
+        </div>
       </div>
     </div>
 
@@ -274,6 +305,16 @@ const granularityNote = computed(() => {
         </div>
         <v-spacer />
         <div class="d-flex flex-wrap align-center ga-3">
+          <v-select
+            v-model="selectedRegion"
+            :items="regionOptions"
+            label="Region"
+            density="compact"
+            variant="outlined"
+            hide-details
+            prepend-inner-icon="mdi-map-marker-outline"
+            style="min-width: 180px"
+          />
           <v-text-field
             v-model="startInput"
             type="date"

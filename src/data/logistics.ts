@@ -191,7 +191,27 @@ export interface Summary {
   exceptions: { type: ExceptionType; count: number }[]
 }
 
-export function summarize(records: DayRecord[]): Summary {
+/**
+ * Fraction of a day's network-wide late shipments attributable to the given
+ * regions. Used to apportion day-level exceptions when filtering by region.
+ */
+function lateShare(record: DayRecord, regions: Region[]): number {
+  const networkLate = record.shipments - record.onTime
+  if (networkLate <= 0) return regions.length === REGIONS.length ? 1 : 0
+  let selectedLate = 0
+  for (const region of regions) {
+    selectedLate += record.regions[region].shipments - record.regions[region].onTime
+  }
+  return Math.max(0, Math.min(1, selectedLate / networkLate))
+}
+
+/**
+ * Summarize records, optionally scoped to a subset of regions. When `regions`
+ * is omitted (or all regions) the full network is summarized.
+ */
+export function summarize(records: DayRecord[], regions: Region[] = [...REGIONS]): Summary {
+  const selected = regions.length ? regions : [...REGIONS]
+
   let totalShipments = 0
   let totalOnTime = 0
   let openExceptions = 0
@@ -212,20 +232,21 @@ export function summarize(records: DayRecord[]): Summary {
   }
 
   for (const r of records) {
-    totalShipments += r.shipments
-    totalOnTime += r.onTime
-    for (const region of REGIONS) {
+    for (const region of selected) {
+      totalShipments += r.regions[region].shipments
+      totalOnTime += r.regions[region].onTime
       regionTotals[region].shipments += r.regions[region].shipments
       regionTotals[region].onTime += r.regions[region].onTime
     }
+    const share = lateShare(r, selected)
     for (const type of EXCEPTION_TYPES) {
-      const c = r.exceptions[type]
+      const c = Math.round(r.exceptions[type] * share)
       exTotals[type] += c
       openExceptions += c
     }
   }
 
-  const regions = REGIONS.map((name) => ({
+  const regions_ = selected.map((name) => ({
     name,
     shipments: regionTotals[name].shipments,
     onTimeRate: regionTotals[name].shipments
@@ -233,9 +254,9 @@ export function summarize(records: DayRecord[]): Summary {
       : 0,
   }))
 
-  const best = regions.reduce(
+  const best = regions_.reduce(
     (acc, r) => (r.onTimeRate > acc.rate ? { name: r.name, rate: r.onTimeRate } : acc),
-    { name: REGIONS[0] as Region, rate: 0 },
+    { name: selected[0] as Region, rate: 0 },
   )
 
   return {
@@ -243,7 +264,7 @@ export function summarize(records: DayRecord[]): Summary {
     onTimeRate: totalShipments ? totalOnTime / totalShipments : 0,
     openExceptions,
     bestRegion: best,
-    regions,
+    regions: regions_,
     exceptions: EXCEPTION_TYPES.map((type) => ({ type, count: exTotals[type] })),
   }
 }
@@ -257,11 +278,15 @@ export interface TrendSeries {
   granularity: 'day' | 'week' | 'month'
 }
 
-/** Builds a time series, auto-bucketing by day/week/month based on span. */
-export function buildTrend(records: DayRecord[]): TrendSeries {
+/**
+ * Builds a time series, auto-bucketing by day/week/month based on span.
+ * Optionally scoped to a subset of regions.
+ */
+export function buildTrend(records: DayRecord[], regions: Region[] = [...REGIONS]): TrendSeries {
   if (records.length === 0) {
     return { labels: [], shipments: [], onTimeRate: [], granularity: 'day' }
   }
+  const selected = regions.length ? regions : [...REGIONS]
 
   const span = records.length
   const granularity: TrendSeries['granularity'] =
@@ -289,9 +314,16 @@ export function buildTrend(records: DayRecord[]): TrendSeries {
       label = d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' })
     }
 
+    let shipments = 0
+    let onTime = 0
+    for (const region of selected) {
+      shipments += r.regions[region].shipments
+      onTime += r.regions[region].onTime
+    }
+
     const b = buckets.get(key) ?? { label, sort, shipments: 0, onTime: 0 }
-    b.shipments += r.shipments
-    b.onTime += r.onTime
+    b.shipments += shipments
+    b.onTime += onTime
     buckets.set(key, b)
   }
 

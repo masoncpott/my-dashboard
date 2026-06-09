@@ -19,6 +19,7 @@
 ## Product requirements:
 - add the ability for users to select specific date ranges and the charts will update and display data specific to that range. The date ranges available should be January 1 2024 to today.
 - If the user selects a date or date range that is outside of this window, handle this edge case gracefully by providing instructions to the user to select dates within the correct window.
+- Users need to also be able to select and filter data by region. It should default to showing data for ALL regions, but if a user selects just one, like the midwest for example, the charts should update to only display data for the midwest within the selected time frame.
 
 
 ## Design:
