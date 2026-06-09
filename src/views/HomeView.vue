@@ -99,6 +99,9 @@ function trendLine(label: string, data: number[], color: string) {
 
 const volumeData = computed(() => trendLine('Shipments', trend.value.shipments, palette.value.primary!))
 const onTimeData = computed(() => trendLine('On-Time Rate', trend.value.onTimeRate, palette.value.success!))
+const satisfactionData = computed(() =>
+  trendLine('Satisfaction', trend.value.satisfaction, palette.value.info!),
+)
 
 const exceptionData = computed(() => ({
   labels: summary.value.exceptions.map((e) => e.type),
@@ -157,6 +160,17 @@ const exceptionData = computed(() => ({
       <v-col cols="12" md="6">
         <ChartCard title="Regional Performance" subtitle="Shipment volume and reliability by region">
           <RegionPerformance :regions="summary.regions" />
+        </ChartCard>
+      </v-col>
+    </v-row>
+
+    <v-row class="mt-6">
+      <v-col cols="12">
+        <ChartCard
+          title="Customer Satisfaction"
+          subtitle="CSAT score (0–100) driven by delivery outcomes — delays, damage, and lost packages drag it down"
+        >
+          <LineChart :data="satisfactionData" :height="300" :suggested-min="60" :suggested-max="100" />
         </ChartCard>
       </v-col>
     </v-row>
