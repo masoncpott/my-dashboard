@@ -16,7 +16,7 @@ import {
 } from '../data/logistics'
 
 const theme = useTheme()
-const palette = computed(() => theme.current.value.colors)
+const palette = computed(() => theme.current.value.colors as Record<string, string>)
 
 const minISO = toISODate(MIN_DATE)
 const maxISO = toISODate(MAX_DATE)
